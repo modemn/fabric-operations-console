@@ -142,44 +142,50 @@ class ChannelParticipationDetails extends Component {
 		);
 	}
 
+	getBlockHeight = channel => {
+		return <span>{channel.height}</span>;
+	}
+
+	showChannelDetails = channel => {
+		this.props.history.push('/orderer/' + encodeURIComponent(this.props.selectedNode.cluster_id) + '/channel/' + encodeURIComponent(channel.name) + window.location.search);
+	}
+
 	render() {
 		return (
 			<div>
 				{this.props.channelList &&
 					(<ItemContainer
 						containerTitle="channels"
-						containerTooltip="cp_channels_tooltip"
+						emptyMessage={this.props.drillDown ? 'empty_cp_channels_text_drilldown' : 'empty_cp_channels_text'}
 						emptyImage={emptyImage}
 						emptyTitle="empty_cp_channels_title"
-						emptyMessage={this.props.drillDown ? 'empty_cp_channels_text_drilldown' : 'empty_cp_channels_text'}
 						itemId="channel-list"
-						id="channel-list-tile"
-						items={(this.props.channelList && Array.isArray(this.props.channelList.channels)) ? this.props.channelList.channels : []}
 						loading={this.props.loading}
+						items={(this.props.channelList && Array.isArray(this.props.channelList.channels)) ? this.props.channelList.channels : []}
 						listMapping={[
-							{
-								header: 'channel',
-								attr: 'name',
-							}
+							{ header: 'channel', attr: 'name' },
+							{ header: 'block_height', custom: this.getBlockHeight },
 						]}
+						// TODO: Should this be disabled if the orderer has a system channel? Should this functionality only be available to the system-channelless orderers?
+						select={this.showChannelDetails}
+						addItems={
+							this.props.isSystemLess ?
+								[{
+									text: 'join_channel',
+									fn: () => {
+										this.joinChannel(null);
+									}
+								}]
+								: []
+						}
+						containerTooltip="cp_channels_tooltip"
+						id="channel-list-tile"
 						tileMapping={{
 							title: 'name',
 							custom: data => {
 								return this.buildCustomTile(data);
 							},
 						}}
-						addItems={
-							this.props.isSystemLess ?
-								[{
-									id: 'join_channel',
-									text: 'join_channel',
-									fn: () => {
-										this.joinChannel(null);
-									}
-								}]
-
-								: []
-						}
 						widerTiles
 					/>)
 				}
@@ -225,6 +231,8 @@ const dataProps = {
 	channelList: PropTypes.object,
 	channelInfo: PropTypes.object,
 	selectedNode: PropTypes.object,
+	isSystemLess: PropTypes.bool,
+	history: PropTypes.object,
 	showCPDetailsModal: PropTypes.bool,
 	showCPUnjoinModal: PropTypes.bool,
 	joinChannelModal: PropTypes.bool,

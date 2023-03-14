@@ -114,6 +114,7 @@ class StitchApi {
 
 	// get config, retry multiple orderers
 	static async getChannelConfigWithRetry(opts, orderers) {
+		console.log('NIK StitchApi Options:', opts)
 		opts.include_bin = true;
 		const getChannelConfigBlockFromOrderer = promisify(window.stitch.getChannelConfigBlockFromOrderer);
 		let opts_copy = _.cloneDeep(opts);

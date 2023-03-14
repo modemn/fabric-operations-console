@@ -1235,6 +1235,7 @@ class OrdererDetails extends Component {
 	};
 
 	render() {
+		if (this.props.selectedNode) console.log("NIK selectedNode", this.props.selectedNode);
 		const free = this.props.clusterType === 'free';
 		const ordererName = this.props.selectedNode ? this.props.selectedNode.display_name : this.props.details ? this.props.details.cluster_name : '';
 		const ordererNameSkeleton = this.props.details && !this.props.details.display_name && (
@@ -1464,6 +1465,7 @@ class OrdererDetails extends Component {
 															loading={this.props.loading}
 															isSystemLess={this.isSystemLess(this.props.details)}
 															drillDown={false}
+															history={this.props.history}
 														/>
 													}
 													{!this.props.loading && !hasAssociatedIdentities && (
@@ -1571,8 +1573,10 @@ class OrdererDetails extends Component {
 														channelList={this.props.channelList}
 														details={this.props.details}
 														loading={this.props.loading}
+														isSystemLess={this.isSystemLess(this.props.selectedNode)}
 														unJoinComplete={this.getCPChannelList}
 														drillDown={true}
+														history={this.props.history}
 													/>
 												</Tab>
 											)}

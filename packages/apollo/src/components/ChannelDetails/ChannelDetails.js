@@ -23,6 +23,8 @@ import { connect } from 'react-redux';
 import emptySmartContractImage from '../../assets/images/empty_installed.svg';
 import { clearNotifications, showBreadcrumb, showError, showSuccess, updateState } from '../../redux/commonActions';
 import ChannelApi from '../../rest/ChannelApi';
+import IdentityApi from '../../rest/IdentityApi';
+import { ChannelParticipationApi } from '../../rest/ChannelParticipationApi';
 import { MspRestApi } from '../../rest/MspRestApi';
 import { NodeRestApi } from '../../rest/NodeRestApi';
 import { OrdererRestApi } from '../../rest/OrdererRestApi';
@@ -133,44 +135,64 @@ class ChannelDetails extends Component {
 		});
 	}
 
-	getChannel(cb) {
-		const peerId = this.props.match.params.peerId || this.channel.peers[0].id;
-		ChannelApi.getChannel(this.props.match.params.channelId, peerId)
-			.then(channel => {
+	async getChannel(cb) {
+		if (this.props.match.params.peerId || (this.channel.peers && this.channel.peers[0].id)) {
+			const peerId = this.props.match.params.peerId || this.channel.peers[0].id;
+			ChannelApi.getChannel(this.props.match.params.channelId, peerId)
+				.then(channel => {
+					console.log("NIK ChannelApi.getChannel:", channel)
+					this.channel = channel;
+					PeerRestApi.getChannelInfoFromPeer(peerId, channel.id)
+						.then(resp => {
+							this.channel.height = resp.height;
+							this.getBlocksForPage(0, 10);
+							let peers = [];
+							if (this.channel && this.channel.peers) {
+								this.channel.peers.forEach(peer => {
+									peer.type = 'peer';
+									peers.push(peer);
+									//peer.certificateWarning = Helper.getLongestExpiry(peer.admin_certs);
+								});
+								this.props.updateState(SCOPE, {
+									peerList: peers,
+								});
+								NodeStatus.getStatus(peers, SCOPE, 'peerList');
+							}
+							cb();
+						})
+						.catch(error => {
+							channel.height = null;
+							cb();
+						});
+				})
+				.catch(error => {
+					this.props.updateState(SCOPE, { loading: false });
+					this.props.showError(
+						'error_channel_not_found',
+						{
+							channelId: this.props.match.params.channelId,
+						},
+						SCOPE
+					);
+				});
+		} else {
+			let orderer = await OrdererRestApi.getClusterDetails(this.props.match.params.clusterId);
+
+			let channel = {};
+
+			// Use ChannelParticipationApi.map1Channel to get the channel
+			try {
+				let all_identities = await IdentityApi.getIdentities();
+				channel = await ChannelParticipationApi.map1Channel(all_identities, [orderer], this.props.match.params.channelId);
+				channel.systemChannel = _.get(this.props.channelList, 'systemChannel.name') === this.props.match.params.channelId;
 				this.channel = channel;
-				PeerRestApi.getChannelInfoFromPeer(peerId, channel.id)
-					.then(resp => {
-						this.channel.height = resp.height;
-						this.getBlocksForPage(0, 10);
-						let peers = [];
-						if (this.channel && this.channel.peers) {
-							this.channel.peers.forEach(peer => {
-								peer.type = 'peer';
-								peers.push(peer);
-								//peer.certificateWarning = Helper.getLongestExpiry(peer.admin_certs);
-							});
-							this.props.updateState(SCOPE, {
-								peerList: peers,
-							});
-							NodeStatus.getStatus(peers, SCOPE, 'peerList');
-						}
-						cb();
-					})
-					.catch(error => {
-						channel.height = null;
-						cb();
-					});
-			})
-			.catch(error => {
+				cb()
+			} catch (error) {
+				Log.error('Unable to get channel list:', error);
 				this.props.updateState(SCOPE, { loading: false });
-				this.props.showError(
-					'error_channel_not_found',
-					{
-						channelId: this.props.match.params.channelId,
-					},
-					SCOPE
-				);
-			});
+				cb()
+			}
+		}
 	}
 
 	getHighestVersionFromCapabilities(capabilities_map) {
@@ -193,299 +215,576 @@ class ChannelDetails extends Component {
 		return highest;
 	}
 
-	getChannelDetails = cb => {
+	getChannelDetails = async cb => {
 		this.props.updateState(SCOPE, { anchorPeersLoading: true });
-		const peerId = this.props.match.params.peerId || this.channel.peers[0].id;
-		NodeRestApi.getNodes().then(nodes => {
-			ChannelApi.getChannelConfig(peerId, this.props.match.params.channelId)
-				.then(config_envelop => {
-					let config = config_envelop.config;
-					let members = [];
-					let ordererMembers = [];
-					let acls = [];
-					let anchorPeers = [];
+		if (this.props.match.params.peerId || (this.channel.peers && this.channel.peers[0].id)) {
+			const peerId = this.props.match.params.peerId || this.channel.peers[0].id;
+			NodeRestApi.getNodes().then(nodes => {
+				ChannelApi.getChannelConfig(peerId, this.props.match.params.channelId)
+					.then(config_envelop => {
+						console.log('NIK config from peer', config_envelop);
+						let config = config_envelop.config;
+						let members = [];
+						let ordererMembers = [];
+						let acls = [];
+						let anchorPeers = [];
 
-					let policies_map = _.get(config, 'channel_group.groups_map.Application.policies_map');
-					let groups_map = _.get(config, 'channel_group.groups_map');
-					let values_map = _.get(config, 'channel_group.values_map');
-					const capabilities = {
-						application:
-							groups_map && groups_map.Application.values_map.Capabilities
-								? this.getHighestVersionFromCapabilities(groups_map.Application.values_map.Capabilities.value.capabilities_map)
-								: '',
-						orderer:
-							groups_map && groups_map.Orderer.values_map.Capabilities
-								? this.getHighestVersionFromCapabilities(groups_map.Orderer.values_map.Capabilities.value.capabilities_map)
-								: '',
-						channel: values_map && values_map.Capabilities ? this.getHighestVersionFromCapabilities(values_map.Capabilities.value.capabilities_map) : '',
-					};
-					let update_obj = { capabilities };
-					const pathname = _.get(this.props, 'history.location.pathname');
-					if (pathname && pathname.indexOf('/debug/') !== -1) {
-						update_obj = { capabilities, debug_block: config_envelop };
-					}
-					this.props.updateState(SCOPE, {
-						...update_obj,
-					});
-					let { readers, writers, admins } = this.getRoles(policies_map);
-
-					const orgNodes = _.get(config, 'channel_group.groups_map.Application.groups_map');
-					const orgs = Object.keys(orgNodes);
-					for (let i in orgs) {
-						const admin_list = _.get(orgNodes[orgs[i]], 'values_map.MSP.value.admins_list');
-						const node_ou = _.get(orgNodes[orgs[i]], 'values_map.MSP.value.fabric_node_ous.enable', false);
-						const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
-						members.push({
-							id: orgs[i],
-							org: orgs[i],
-							node_ou: _.get(orgNodes[orgs[i]], 'values_map.MSP.value.fabric_node_ous.enable', false),
-							roles: admins.includes(orgs[i])
-								? ['admin', 'writer', 'reader']
-								: writers.includes(orgs[i])
-									? ['writer', 'reader']
-									: readers.includes(orgs[i])
-										? ['reader']
-										: ['reader'],
-							admins: admin_list,
-							certificateWarning,
-							root_certs: _.get(orgNodes[orgs[i]], 'values_map.MSP.value.root_certs_list'),
-						});
-					}
-
-					const ordererNodes = _.get(config, 'channel_group.groups_map.Orderer.groups_map');
-					const orderers = Object.keys(ordererNodes);
-					for (let i in orderers) {
-						const admin_list = _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.admins_list');
-						const node_ou = _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.fabric_node_ous.enable', false);
-						const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
-						ordererMembers.push({
-							id: orderers[i],
-							org: orderers[i],
-							node_ou: _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.fabric_node_ous.enable', false),
-							msp_id: orderers[i],
-							admins: admin_list,
-							certificateWarning,
-							root_certs: _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.root_certs_list'),
-							isOrdererMSP: true,
-						});
-					}
-
-					const acl_definitions = _.get(config, 'channel_group.groups_map.Application.values_map.ACLs.value.acls_map');
-					for (const acl in acl_definitions) {
-						const acl_def = {
-							id: acl,
-							resource: acl,
-							policy_ref: acl_definitions[acl].policy_ref,
+						let policies_map = _.get(config, 'channel_group.groups_map.Application.policies_map');
+						let groups_map = _.get(config, 'channel_group.groups_map');
+						let values_map = _.get(config, 'channel_group.values_map');
+						const capabilities = {
+							application:
+								groups_map && groups_map.Application.values_map.Capabilities
+									? this.getHighestVersionFromCapabilities(groups_map.Application.values_map.Capabilities.value.capabilities_map)
+									: '',
+							orderer:
+								groups_map && groups_map.Orderer.values_map.Capabilities
+									? this.getHighestVersionFromCapabilities(groups_map.Orderer.values_map.Capabilities.value.capabilities_map)
+									: '',
+							channel: values_map && values_map.Capabilities ? this.getHighestVersionFromCapabilities(values_map.Capabilities.value.capabilities_map) : '',
 						};
-						acls.push(acl_def);
-					}
+						let update_obj = { capabilities };
+						const pathname = _.get(this.props, 'history.location.pathname');
+						if (pathname && pathname.indexOf('/debug/') !== -1) {
+							update_obj = { capabilities, debug_block: config_envelop };
+						}
+						this.props.updateState(SCOPE, {
+							...update_obj,
+						});
+						let { readers, writers, admins } = this.getRoles(policies_map);
 
-					for (let node in orgNodes) {
-						const peers = _.get(orgNodes[node], 'values_map.AnchorPeers.value.anchor_peers_list');
-						for (let peer in peers) {
-							anchorPeers.push({
-								id: peers[peer].host + ':' + peers[peer].port,
-								msp_id: node,
-								host: peers[peer].host,
-								port: peers[peer].port,
-								grpcwp_url: peers[peer].host + ':' + peers[peer].port,
+						const orgNodes = _.get(config, 'channel_group.groups_map.Application.groups_map');
+						const orgs = Object.keys(orgNodes);
+						for (let i in orgs) {
+							const admin_list = _.get(orgNodes[orgs[i]], 'values_map.MSP.value.admins_list');
+							const node_ou = _.get(orgNodes[orgs[i]], 'values_map.MSP.value.fabric_node_ous.enable', false);
+							const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
+							members.push({
+								id: orgs[i],
+								org: orgs[i],
+								node_ou: _.get(orgNodes[orgs[i]], 'values_map.MSP.value.fabric_node_ous.enable', false),
+								roles: admins.includes(orgs[i])
+									? ['admin', 'writer', 'reader']
+									: writers.includes(orgs[i])
+										? ['writer', 'reader']
+										: readers.includes(orgs[i])
+											? ['reader']
+											: ['reader'],
+								admins: admin_list,
+								certificateWarning,
+								root_certs: _.get(orgNodes[orgs[i]], 'values_map.MSP.value.root_certs_list'),
 							});
 						}
-					}
 
-					this.acls = acls;
-					this.anchorPeers = anchorPeers;
-					nodes.forEach(node => {
-						this.anchorPeers.forEach(anchorPeer => {
-							if (node.type === 'fabric-peer' && anchorPeer.grpcwp_url.toLowerCase() === node.backend_addr.toLowerCase()) {
-								anchorPeer.display_name = node.name;
-								anchorPeer.id = node.id;
+						const ordererNodes = _.get(config, 'channel_group.groups_map.Orderer.groups_map');
+						const orderers = Object.keys(ordererNodes);
+						for (let i in orderers) {
+							const admin_list = _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.admins_list');
+							const node_ou = _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.fabric_node_ous.enable', false);
+							const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
+							ordererMembers.push({
+								id: orderers[i],
+								org: orderers[i],
+								node_ou: _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.fabric_node_ous.enable', false),
+								msp_id: orderers[i],
+								admins: admin_list,
+								certificateWarning,
+								root_certs: _.get(ordererNodes[orderers[i]], 'values_map.MSP.value.root_certs_list'),
+								isOrdererMSP: true,
+							});
+						}
+
+						const acl_definitions = _.get(config, 'channel_group.groups_map.Application.values_map.ACLs.value.acls_map');
+						for (const acl in acl_definitions) {
+							const acl_def = {
+								id: acl,
+								resource: acl,
+								policy_ref: acl_definitions[acl].policy_ref,
+							};
+							acls.push(acl_def);
+						}
+
+						for (let node in orgNodes) {
+							const peers = _.get(orgNodes[node], 'values_map.AnchorPeers.value.anchor_peers_list');
+							for (let peer in peers) {
+								anchorPeers.push({
+									id: peers[peer].host + ':' + peers[peer].port,
+									msp_id: node,
+									host: peers[peer].host,
+									port: peers[peer].port,
+									grpcwp_url: peers[peer].host + ':' + peers[peer].port,
+								});
 							}
-						});
-					});
+						}
 
-					const policy = _.get(config, 'channel_group.groups_map.Application.policies_map.Admins.policy.value.rule.n_out_of');
-					if (policy) {
-						this.nOutOf.n = policy.n;
-						this.nOutOf.outOf = policy.rules_list ? policy.rules_list.length : 1;
-					}
-
-					const blockParams = _.get(config, 'channel_group.groups_map.Orderer.values_map');
-					if (blockParams && blockParams.BatchSize) {
-						this.blockParams.absolute_max_bytes = blockParams.BatchSize.value.absolute_max_bytes;
-						this.blockParams.preferred_max_bytes = blockParams.BatchSize.value.preferred_max_bytes;
-						this.blockParams.max_message_count = blockParams.BatchSize.value.max_message_count;
-					}
-					if (blockParams && blockParams.BatchTimeout) {
-						this.blockParams.timeout = blockParams.BatchTimeout.value.timeout;
-					}
-
-					const raftParams = _.get(config, 'channel_group.groups_map.Orderer.values_map.ConsensusType.value.metadata.options', null);
-					if (raftParams) {
-						this.raftParams.tick_interval = raftParams.tick_interval;
-						this.raftParams.election_tick = raftParams.election_tick;
-						this.raftParams.heartbeat_tick = raftParams.heartbeat_tick;
-						this.raftParams.max_inflight_blocks = raftParams.max_inflight_blocks;
-						this.raftParams.snapshot_interval_size = raftParams.snapshot_interval_size;
-					}
-
-					this.capabilities = this.getCapabilities(config);
-
-					const lifecyclePolicyType = _.get(config, 'channel_group.groups_map.Application.policies_map.LifecycleEndorsement.policy.type', null);
-					const lifecyclePolicyValue = _.get(config, 'channel_group.groups_map.Application.policies_map.LifecycleEndorsement.policy.value', null);
-					if (lifecyclePolicyType === 3) {
-						this.existingLifecyclePolicy.type = lifecyclePolicyValue.rule;
-						this.existingLifecyclePolicy.n = '';
-						this.existingLifecyclePolicy.members = [];
-					} else if (!_.isEmpty(lifecyclePolicyValue)) {
-						this.existingLifecyclePolicy.type = 'SPECIFIC';
-						this.existingLifecyclePolicy.n = _.get(lifecyclePolicyValue, 'rule.n_out_of.n', null);
-						this.existingLifecyclePolicy.members = lifecyclePolicyValue.identities_list.map(x => x.principal.msp_identifier);
-					}
-
-					const endorsementPolicyType = _.get(config, 'channel_group.groups_map.Application.policies_map.Endorsement.policy.type', null);
-					const endorsementPolicyValue = _.get(config, 'channel_group.groups_map.Application.policies_map.Endorsement.policy.value', null);
-					if (endorsementPolicyType === 3) {
-						this.existingEndorsementPolicy.type = endorsementPolicyValue.rule;
-						this.existingEndorsementPolicy.n = '';
-						this.existingEndorsementPolicy.members = [];
-					} else if (!_.isEmpty(endorsementPolicyValue)) {
-						this.existingEndorsementPolicy.type = 'SPECIFIC';
-						this.existingEndorsementPolicy.n = _.get(endorsementPolicyValue, 'rule.n_out_of.n', null);
-						this.existingEndorsementPolicy.members = endorsementPolicyValue.identities_list.map(x => x.principal.msp_identifier);
-					}
-
-					this.props.updateState(SCOPE, {
-						members,
-						ordererMembers,
-						anchorPeersLoading: false,
-					});
-					return config;
-				})
-				.then(config => {
-					const l_orderers = ChannelApi.getOrdererAddresses(config);
-					const l_consenters = _.get(config, 'channel_group.groups_map.Orderer.values_map.ConsensusType.value.metadata.consenters', []);
-					OrdererRestApi.getOrderers(true)
-						.then(orderers => {
-							let isTLSCertMismatchFound = false;
-							l_orderers.forEach(orderer => {
-								orderers.forEach(node => {
-									// Also check the raft nodes within
-									let matchingRaftNode = false;
-									if (node.raft && node.raft.length > 0) {
-										matchingRaftNode = node.raft.find(x => _.toLower(x.backend_addr) === _.toLower(orderer));
-									}
-									if (_.toLower(node.backend_addr) === _.toLower(orderer) || matchingRaftNode) {
-										if (!this.orderers.find(x => x.id === node.id)) {
-											this.orderers.push(node);
-										}
-									}
-									let orderers = [];
-									if (this.channel && this.channel.orderers) {
-										this.channel.orderers.forEach(orderer => {
-											orderer.type = 'orderer';
-											//orderer.certificateWarning = Helper.getLongestExpiry(orderer.admin_certs);
-											orderers.push(orderer);
-										});
-										this.props.updateState(SCOPE, {
-											ordererList: orderers,
-										});
-										NodeStatus.getStatus(orderers, SCOPE, 'ordererList');
-									}
-								});
-							});
-							let raft_nodes = orderers ? orderers.filter(node => node.raft && node.raft.length > 0).map(node => node.raft) : [];
-							raft_nodes = _.flatten(raft_nodes);
-							l_consenters.forEach(orderer => {
-								orderer.tls_cert_mismatch = false;
-								raft_nodes.forEach(node => {
-									if (_.toLower(node.backend_addr).includes(_.toLower(orderer.host) + ':' + _.toLower(orderer.port))) {
-										orderer.name = node.name;
-										orderer.display_name = node.display_name;
-										orderer.url = node.backend_addr;
-										const tls_cert_mismatch = Helper.isTLSCertMismatch(orderer, node);
-										if (tls_cert_mismatch) {
-											isTLSCertMismatchFound = true;
-											orderer.tls_cert_mismatch = true;
-											orderer.tls_new_cert = node.client_tls_cert;
-										}
-									}
-								});
-							});
-							l_consenters.forEach(orderer => {
-								if (!_.has(orderer, 'url')) {
-									orderer.url = orderer.host + ':' + orderer.port;
+						this.acls = acls;
+						this.anchorPeers = anchorPeers;
+						nodes.forEach(node => {
+							this.anchorPeers.forEach(anchorPeer => {
+								if (node.type === 'fabric-peer' && anchorPeer.grpcwp_url.toLowerCase() === node.backend_addr.toLowerCase()) {
+									anchorPeer.display_name = node.name;
+									anchorPeer.id = node.id;
 								}
 							});
-							this.allOrderers = orderers;
-							this.consenters = l_consenters;
-							if (this.props.ordererList.length < 1)
-							{
-								this.props.updateState(SCOPE, {
-									ordererCheck: false,
-								});
-							}
-							return isTLSCertMismatchFound;
-						})
-						.then(isTLSCertMismatchFound => {
-
-							// Populate the orderer host url and orderer msps for the update cert flow && the remove consenter flow
-							MspRestApi.getAllMsps()
-								.then(async all_msps => {
-									let msps = [];
-									all_msps.forEach(msp => {
-										msps.push({ ...msp, display_name: msp.display_name + ' (' + msp.msp_id + ')' });
-									});
-
-									if (_.size(this.channel.orderers) > 0) {
-										const orderer_msp_ids = [];
-										this.channel.orderers.forEach(x =>
-											_.has(x, 'raft') ? x.raft.forEach(y => orderer_msp_ids.push(y.msp_id)) : orderer_msp_ids.push(x.msp_id)
-										);
-										msps = msps.filter(msp => orderer_msp_ids.includes(msp.msp_id));
-									}
-									this.props.updateState(SCOPE, {
-										ordererMSPs: msps,
-									});
-
-									const channelOrderer = this.orderers && this.orderers.length ? this.orderers[0] : null;
-									this.ordererHost = await OrdererRestApi.getOrdererURL(channelOrderer, this.consenters);
-									if (cb) cb();
-								})
-								.catch(error => {
-									Log.error(error);
-									this.props.updateState(SCOPE, { ordererMSPs: [] });
-									if (cb) cb();
-								});
 						});
-				})
-				.catch(error => {
-					this.acls = [];
-					this.anchorPeers = [];
-					this.props.updateState(SCOPE, { loading: false, members: [], ordererMembers: [], anchorPeersLoading: false });
-					Log.error(error);
-					this.props.showError(
-						'error_channel_details_not_found',
-						{
-							peerId: this.props.match.params.peerId,
-							channelId: this.props.match.params.channelId,
-						},
-						SCOPE
-					);
-					if (cb) cb();
+
+						const policy = _.get(config, 'channel_group.groups_map.Application.policies_map.Admins.policy.value.rule.n_out_of');
+						if (policy) {
+							this.nOutOf.n = policy.n;
+							this.nOutOf.outOf = policy.rules_list ? policy.rules_list.length : 1;
+						}
+
+						const blockParams = _.get(config, 'channel_group.groups_map.Orderer.values_map');
+						if (blockParams && blockParams.BatchSize) {
+							this.blockParams.absolute_max_bytes = blockParams.BatchSize.value.absolute_max_bytes;
+							this.blockParams.preferred_max_bytes = blockParams.BatchSize.value.preferred_max_bytes;
+							this.blockParams.max_message_count = blockParams.BatchSize.value.max_message_count;
+						}
+						if (blockParams && blockParams.BatchTimeout) {
+							this.blockParams.timeout = blockParams.BatchTimeout.value.timeout;
+						}
+
+						const raftParams = _.get(config, 'channel_group.groups_map.Orderer.values_map.ConsensusType.value.metadata.options', null);
+						if (raftParams) {
+							this.raftParams.tick_interval = raftParams.tick_interval;
+							this.raftParams.election_tick = raftParams.election_tick;
+							this.raftParams.heartbeat_tick = raftParams.heartbeat_tick;
+							this.raftParams.max_inflight_blocks = raftParams.max_inflight_blocks;
+							this.raftParams.snapshot_interval_size = raftParams.snapshot_interval_size;
+						}
+
+						this.capabilities = this.getCapabilities(config);
+
+						const lifecyclePolicyType = _.get(config, 'channel_group.groups_map.Application.policies_map.LifecycleEndorsement.policy.type', null);
+						const lifecyclePolicyValue = _.get(config, 'channel_group.groups_map.Application.policies_map.LifecycleEndorsement.policy.value', null);
+						if (lifecyclePolicyType === 3) {
+							this.existingLifecyclePolicy.type = lifecyclePolicyValue.rule;
+							this.existingLifecyclePolicy.n = '';
+							this.existingLifecyclePolicy.members = [];
+						} else if (!_.isEmpty(lifecyclePolicyValue)) {
+							this.existingLifecyclePolicy.type = 'SPECIFIC';
+							this.existingLifecyclePolicy.n = _.get(lifecyclePolicyValue, 'rule.n_out_of.n', null);
+							this.existingLifecyclePolicy.members = lifecyclePolicyValue.identities_list.map(x => x.principal.msp_identifier);
+						}
+
+						const endorsementPolicyType = _.get(config, 'channel_group.groups_map.Application.policies_map.Endorsement.policy.type', null);
+						const endorsementPolicyValue = _.get(config, 'channel_group.groups_map.Application.policies_map.Endorsement.policy.value', null);
+						if (endorsementPolicyType === 3) {
+							this.existingEndorsementPolicy.type = endorsementPolicyValue.rule;
+							this.existingEndorsementPolicy.n = '';
+							this.existingEndorsementPolicy.members = [];
+						} else if (!_.isEmpty(endorsementPolicyValue)) {
+							this.existingEndorsementPolicy.type = 'SPECIFIC';
+							this.existingEndorsementPolicy.n = _.get(endorsementPolicyValue, 'rule.n_out_of.n', null);
+							this.existingEndorsementPolicy.members = endorsementPolicyValue.identities_list.map(x => x.principal.msp_identifier);
+						}
+
+						this.props.updateState(SCOPE, {
+							members,
+							ordererMembers,
+							anchorPeersLoading: false,
+						});
+						return config;
+					})
+					.then(config => {
+						const l_orderers = ChannelApi.getOrdererAddresses(config);
+						const l_consenters = _.get(config, 'channel_group.groups_map.Orderer.values_map.ConsensusType.value.metadata.consenters', []);
+						OrdererRestApi.getOrderers(true)
+							.then(orderers => {
+								let isTLSCertMismatchFound = false;
+								l_orderers.forEach(orderer => {
+									orderers.forEach(node => {
+										// Also check the raft nodes within
+										let matchingRaftNode = false;
+										if (node.raft && node.raft.length > 0) {
+											matchingRaftNode = node.raft.find(x => _.toLower(x.backend_addr) === _.toLower(orderer));
+										}
+										if (_.toLower(node.backend_addr) === _.toLower(orderer) || matchingRaftNode) {
+											if (!this.orderers.find(x => x.id === node.id)) {
+												this.orderers.push(node);
+											}
+										}
+										let orderers = [];
+										if (this.channel && this.channel.orderers) {
+											this.channel.orderers.forEach(orderer => {
+												orderer.type = 'orderer';
+												//orderer.certificateWarning = Helper.getLongestExpiry(orderer.admin_certs);
+												orderers.push(orderer);
+											});
+											this.props.updateState(SCOPE, {
+												ordererList: orderers,
+											});
+											NodeStatus.getStatus(orderers, SCOPE, 'ordererList');
+										}
+									});
+								});
+								let raft_nodes = orderers ? orderers.filter(node => node.raft && node.raft.length > 0).map(node => node.raft) : [];
+								raft_nodes = _.flatten(raft_nodes);
+								l_consenters.forEach(orderer => {
+									orderer.tls_cert_mismatch = false;
+									raft_nodes.forEach(node => {
+										if (_.toLower(node.backend_addr).includes(_.toLower(orderer.host) + ':' + _.toLower(orderer.port))) {
+											orderer.name = node.name;
+											orderer.display_name = node.display_name;
+											orderer.url = node.backend_addr;
+											const tls_cert_mismatch = Helper.isTLSCertMismatch(orderer, node);
+											if (tls_cert_mismatch) {
+												isTLSCertMismatchFound = true;
+												orderer.tls_cert_mismatch = true;
+												orderer.tls_new_cert = node.client_tls_cert;
+											}
+										}
+									});
+								});
+								l_consenters.forEach(orderer => {
+									if (!_.has(orderer, 'url')) {
+										orderer.url = orderer.host + ':' + orderer.port;
+									}
+								});
+								this.allOrderers = orderers;
+								this.consenters = l_consenters;
+								if (this.props.ordererList.length < 1) {
+									this.props.updateState(SCOPE, {
+										ordererCheck: false,
+									});
+								}
+								return isTLSCertMismatchFound;
+							})
+							.then(isTLSCertMismatchFound => {
+
+								// Populate the orderer host url and orderer msps for the update cert flow && the remove consenter flow
+								MspRestApi.getAllMsps()
+									.then(async all_msps => {
+										let msps = [];
+										all_msps.forEach(msp => {
+											msps.push({ ...msp, display_name: msp.display_name + ' (' + msp.msp_id + ')' });
+										});
+
+										if (_.size(this.channel.orderers) > 0) {
+											const orderer_msp_ids = [];
+											this.channel.orderers.forEach(x =>
+												_.has(x, 'raft') ? x.raft.forEach(y => orderer_msp_ids.push(y.msp_id)) : orderer_msp_ids.push(x.msp_id)
+											);
+											msps = msps.filter(msp => orderer_msp_ids.includes(msp.msp_id));
+										}
+										this.props.updateState(SCOPE, {
+											ordererMSPs: msps,
+										});
+
+										const channelOrderer = this.orderers && this.orderers.length ? this.orderers[0] : null;
+										this.ordererHost = await OrdererRestApi.getOrdererURL(channelOrderer, this.consenters);
+										if (cb) cb();
+									})
+									.catch(error => {
+										Log.error(error);
+										this.props.updateState(SCOPE, { ordererMSPs: [] });
+										if (cb) cb();
+									});
+							});
+					})
+					.catch(error => {
+						this.acls = [];
+						this.anchorPeers = [];
+						this.props.updateState(SCOPE, { loading: false, members: [], ordererMembers: [], anchorPeersLoading: false });
+						Log.error(error);
+						this.props.showError(
+							'error_channel_details_not_found',
+							{
+								peerId: this.props.match.params.peerId,
+								channelId: this.props.match.params.channelId,
+							},
+							SCOPE
+						);
+						if (cb) cb();
+					});
+			});
+		} else {
+			const options = {
+				ordererId: Object.keys(this.channel.nodes)[0],
+				channelId: this.props.match.params.channelId,
+				configtxlator_url: this.props.configtxlator_url,
+			};
+
+			let config_envelop = null
+			try {
+				config_envelop = await OrdererRestApi.getChannelConfig(options)
+				console.log('NIK config from orderer:', config_envelop);
+
+				let members = [];
+				let ordererMembers = [];
+				let acls = [];
+				let anchorPeers = [];
+
+				let policies_map = _.get(config_envelop, 'channel_group.groups.Application.policies');
+				let groups_map = _.get(config_envelop, 'channel_group.groups');
+				let values_map = _.get(config_envelop, 'channel_group.values');
+
+				const capabilities = {
+					application:
+						groups_map && groups_map.Application.values.Capabilities
+							? this.getHighestVersionFromCapabilities(groups_map.Application.values.Capabilities.value.capabilities)
+							: '',
+					orderer:
+						groups_map && groups_map.Orderer.values.Capabilities
+							? this.getHighestVersionFromCapabilities(groups_map.Orderer.values.Capabilities.value.capabilities)
+							: '',
+					channel: values_map && values_map.Capabilities ? this.getHighestVersionFromCapabilities(values_map.Capabilities.value.capabilities) : '',
+				};
+
+				let update_obj = { capabilities };
+				const pathname = _.get(this.props, 'history.location.pathname');
+				if (pathname && pathname.indexOf('/debug/') !== -1) {
+					update_obj = { capabilities, debug_block: config_envelop };
+				}
+				this.props.updateState(SCOPE, {
+					...update_obj,
 				});
-		});
+				let { readers, writers, admins } = this.getRoles(policies_map);
+				const orgNodes = _.get(config_envelop, 'channel_group.groups.Application.groups');
+				const orgs = Object.keys(orgNodes);
+
+				for (let i in orgs) {
+					const admin_list = _.get(orgNodes[orgs[i]], 'values.MSP.value.config.admins');
+					const node_ou = _.get(orgNodes[orgs[i]], 'values.MSP.value.fabric_node_ous.enable', false);
+					const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
+					members.push({
+						id: orgs[i],
+						org: orgs[i],
+						node_ou: _.get(orgNodes[orgs[i]], 'values.MSP.value.config.fabric_node_ous.enable', false),
+						roles: admins.includes(orgs[i])
+							? ['admin', 'writer', 'reader']
+							: writers.includes(orgs[i])
+								? ['writer', 'reader']
+								: readers.includes(orgs[i])
+									? ['reader']
+									: ['reader'],
+						admins: admin_list,
+						certificateWarning,
+						root_certs: _.get(orgNodes[orgs[i]], 'values.MSP.value.config.root_certs'),
+					});
+				}
+
+				const ordererNodes = _.get(config_envelop, 'channel_group.groups.Orderer.groups');
+				const ordererKeys = Object.keys(ordererNodes);
+				for (let i in ordererKeys) {
+					const admin_list = _.get(ordererNodes[ordererKeys[i]], 'values.MSP.value.admins');
+					const node_ou = _.get(ordererNodes[ordererKeys[i]], 'values.MSP.value.config.fabric_node_ous.enable', false);
+					const certificateWarning = Helper.getLongestExpiry(node_ou ? [] : admin_list);
+					ordererMembers.push({
+						id: ordererKeys[i],
+						org: ordererKeys[i],
+						node_ou: _.get(ordererNodes[ordererKeys[i]], 'values.MSP.value.config.fabric_node_ous.enable', false),
+						msp_id: ordererKeys[i],
+						admins: admin_list,
+						certificateWarning,
+						root_certs: _.get(ordererNodes[ordererKeys[i]], 'values.MSP.value.config.root_certs_list'),
+						isOrdererMSP: true,
+					});
+				}
+
+				const acl_definitions = _.get(config_envelop, 'channel_group.groups.Application.values.ACLs.value.acls_map');
+				for (const acl in acl_definitions) {
+					const acl_def = {
+						id: acl,
+						resource: acl,
+						policy_ref: acl_definitions[acl].policy_ref,
+					};
+					acls.push(acl_def);
+				}
+
+				for (let node in orgNodes) {
+					const peers = _.get(orgNodes[node], 'values.AnchorPeers.value.anchor_peers');
+					for (let peer in peers) {
+						anchorPeers.push({
+							id: peers[peer].host + ':' + peers[peer].port,
+							msp_id: node,
+							host: peers[peer].host,
+							port: peers[peer].port,
+							grpcwp_url: peers[peer].host + ':' + peers[peer].port,
+						});
+					}
+				}
+
+				this.acls = acls;
+				this.anchorPeers = anchorPeers;
+				let nodes = await NodeRestApi.getNodes()
+				nodes.forEach(node => {
+					this.anchorPeers.forEach(anchorPeer => {
+						if (node.type === 'fabric-peer' && anchorPeer.grpcwp_url.toLowerCase() === node.backend_addr.toLowerCase()) {
+							anchorPeer.display_name = node.name;
+							anchorPeer.id = node.id;
+						}
+					});
+				});
+
+				const policy = _.get(config_envelop, 'channel_group.groups.Application.policies.Admins.policy.value.rule.n_out_of');
+				if (policy) {
+					this.nOutOf.n = policy.n;
+					this.nOutOf.outOf = policy.rules ? policy.rules.length : 1;
+				}
+
+				const blockParams = _.get(config_envelop, 'channel_group.groups.Orderer.values');
+				if (blockParams && blockParams.BatchSize) {
+					this.blockParams.absolute_max_bytes = blockParams.BatchSize.value.absolute_max_bytes;
+					this.blockParams.preferred_max_bytes = blockParams.BatchSize.value.preferred_max_bytes;
+					this.blockParams.max_message_count = blockParams.BatchSize.value.max_message_count;
+				}
+				if (blockParams && blockParams.BatchTimeout) {
+					this.blockParams.timeout = blockParams.BatchTimeout.value.timeout;
+				}
+
+				const raftParams = _.get(config_envelop, 'channel_group.groups.Orderer.values.ConsensusType.value.metadata.options', null);
+				if (raftParams) {
+					this.raftParams.tick_interval = raftParams.tick_interval;
+					this.raftParams.election_tick = raftParams.election_tick;
+					this.raftParams.heartbeat_tick = raftParams.heartbeat_tick;
+					this.raftParams.max_inflight_blocks = raftParams.max_inflight_blocks;
+					this.raftParams.snapshot_interval_size = raftParams.snapshot_interval_size;
+				}
+
+				this.capabilities = this.getCapabilities(config_envelop);
+
+				const lifecyclePolicyType = _.get(config_envelop, 'channel_group.groups.Application.policies.LifecycleEndorsement.policy.type', null);
+				const lifecyclePolicyValue = _.get(config_envelop, 'channel_group.groups.Application.policies.LifecycleEndorsement.policy.value', null);
+				if (lifecyclePolicyType === 3) {
+					this.existingLifecyclePolicy.type = lifecyclePolicyValue.rule;
+					this.existingLifecyclePolicy.n = '';
+					this.existingLifecyclePolicy.members = [];
+				} else if (!_.isEmpty(lifecyclePolicyValue)) {
+					this.existingLifecyclePolicy.type = 'SPECIFIC';
+					this.existingLifecyclePolicy.n = _.get(lifecyclePolicyValue, 'rule.n_out_of.n', null);
+					this.existingLifecyclePolicy.members = lifecyclePolicyValue.identities_list.map(x => x.principal.msp_identifier);
+				}
+
+				const endorsementPolicyType = _.get(config_envelop, 'channel_group.groups.Application.policies.Endorsement.policy.type', null);
+				const endorsementPolicyValue = _.get(config_envelop, 'channel_group.groups.Application.policies.Endorsement.policy.value', null);
+				if (endorsementPolicyType === 3) {
+					this.existingEndorsementPolicy.type = endorsementPolicyValue.rule;
+					this.existingEndorsementPolicy.n = '';
+					this.existingEndorsementPolicy.members = [];
+				} else if (!_.isEmpty(endorsementPolicyValue)) {
+					this.existingEndorsementPolicy.type = 'SPECIFIC';
+					this.existingEndorsementPolicy.n = _.get(endorsementPolicyValue, 'rule.n_out_of.n', null);
+					this.existingEndorsementPolicy.members = endorsementPolicyValue.identities_list.map(x => x.principal.msp_identifier);
+				}
+
+				this.props.updateState(SCOPE, {
+					members,
+					ordererMembers,
+					anchorPeersLoading: false,
+				});
+
+				const l_orderers = ChannelApi.getOrdererAddresses(config_envelop);
+				const l_consenters = _.get(config_envelop, 'channel_group.groups.Orderer.values.ConsensusType.value.metadata.consenters', []);
+				let orderers = await OrdererRestApi.getOrderers(true)
+				let isTLSCertMismatchFound = false;
+				l_orderers.forEach(orderer => {
+					orderers.forEach(node => {
+						// Also check the raft nodes within
+						let matchingRaftNode = false;
+						if (node.raft && node.raft.length > 0) {
+							matchingRaftNode = node.raft.find(x => _.toLower(x.backend_addr) === _.toLower(orderer));
+						}
+						if (_.toLower(node.backend_addr) === _.toLower(orderer) || matchingRaftNode) {
+							if (!this.orderers.find(x => x.id === node.id)) {
+								this.orderers.push(node);
+							}
+						}
+						let orderers = [];
+						if (this.channel && this.channel.orderers) {
+							this.channel.orderers.forEach(orderer => {
+								orderer.type = 'orderer';
+								//orderer.certificateWarning = Helper.getLongestExpiry(orderer.admin_certs);
+								orderers.push(orderer);
+							});
+							this.props.updateState(SCOPE, {
+								ordererList: orderers,
+							});
+							NodeStatus.getStatus(orderers, SCOPE, 'ordererList');
+						}
+					});
+				});
+
+				let raft_nodes = orderers ? orderers.filter(node => node.raft && node.raft.length > 0).map(node => node.raft) : [];
+				raft_nodes = _.flatten(raft_nodes);
+				l_consenters.forEach(orderer => {
+					orderer.tls_cert_mismatch = false;
+					raft_nodes.forEach(node => {
+						if (_.toLower(node.backend_addr).includes(_.toLower(orderer.host) + ':' + _.toLower(orderer.port))) {
+							orderer.name = node.name;
+							orderer.display_name = node.display_name;
+							orderer.url = node.backend_addr;
+							const tls_cert_mismatch = Helper.isTLSCertMismatch(orderer, node);
+							if (tls_cert_mismatch) {
+								isTLSCertMismatchFound = true;
+								orderer.tls_cert_mismatch = true;
+								orderer.tls_new_cert = node.client_tls_cert;
+							}
+						}
+					});
+				});
+
+				l_consenters.forEach(orderer => {
+					if (!_.has(orderer, 'url')) {
+						orderer.url = orderer.host + ':' + orderer.port;
+					}
+				});
+
+				this.allOrderers = orderers;
+				this.consenters = l_consenters;
+				if (this.props.ordererList.length < 1) {
+					this.props.updateState(SCOPE, {
+						ordererCheck: false,
+					});
+				}
+
+				let all_msps = await MspRestApi.getAllMsps()
+				let msps = [];
+				all_msps.forEach(msp => {
+					msps.push({ ...msp, display_name: msp.display_name + ' (' + msp.msp_id + ')' });
+				});
+
+				if (_.size(this.channel.orderers) > 0) {
+					const orderer_msp_ids = [];
+					this.channel.orderers.forEach(x =>
+						_.has(x, 'raft') ? x.raft.forEach(y => orderer_msp_ids.push(y.msp_id)) : orderer_msp_ids.push(x.msp_id)
+					);
+					msps = msps.filter(msp => orderer_msp_ids.includes(msp.msp_id));
+				}
+				this.props.updateState(SCOPE, {
+					ordererMSPs: msps,
+				});
+
+				const channelOrderer = this.orderers && this.orderers.length ? this.orderers[0] : null;
+				this.ordererHost = await OrdererRestApi.getOrdererURL(channelOrderer, this.consenters);
+				if (cb) cb();
+
+
+			} catch (error) {
+				Log.error(error)
+				throw error;
+			}
+		}
 	};
 
 	// Get the channel, application and orderer capability levels for the application channel
+	// Need to account for how the config differs between the ChannelApi and OrdererRestApi
 	getCapabilities(config) {
-		const channelCapabilityNode = _.get(config, 'channel_group.values_map.Capabilities.value.capabilities_map', {});
+		const channelCapabilityNode = _.get(config, 'channel_group.values_map.Capabilities.value.capabilities_map', {}) ?
+			_.get(config, 'channel_group.values_map.Capabilities.value.capabilities_map', {}) :
+			_.get(config, 'channel_group.values.Capabilities.value.capabilities_map', {});
+
 		const channelCapability = this.getHighestVersionFromCapabilities(channelCapabilityNode);
 
-		const ordererCapabilityNode = _.get(config, 'channel_group.groups_map.Orderer.values_map.Capabilities.value.capabilities_map', {});
+		const ordererCapabilityNode = _.get(config, 'channel_group.groups_map.Orderer.values_map.Capabilities.value.capabilities_map', {}) ?
+			_.get(config, 'channel_group.groups_map.Orderer.values_map.Capabilities.value.capabilities_map', {}) :
+			_.get(config, 'channel_group.groups.Orderer.values.Capabilities.value.capabilities', {});
+
 		const ordererCapability = this.getHighestVersionFromCapabilities(ordererCapabilityNode);
 
-		const applicationCapabilityNode = _.get(config, 'channel_group.groups_map.Application.values_map.Capabilities.value.capabilities_map', {});
+		const applicationCapabilityNode = _.get(config, 'channel_group.groups_map.Application.values_map.Capabilities.value.capabilities_map', {}) ?
+			_.get(config, 'channel_group.groups_map.Application.values_map.Capabilities.value.capabilities_map', {}) :
+			_.get(config, 'channel_group.groups.Application.values.Capabilities.value.capabilities', {});
 		const applicationCapability = this.getHighestVersionFromCapabilities(applicationCapabilityNode);
 
 		const capabilities = {
@@ -501,7 +800,11 @@ class ChannelDetails extends Component {
 		let writers = [];
 		let admins = [];
 		for (let pol in policies) {
-			let identities = _.get(policies[pol], 'policy.value.identities_list');
+			// config returned from OrdererRestApi.getChannelConfig()
+			// has slightly different naming scheme than ChannelApi.getChannel()
+			let identities = _.get(policies[pol], 'policy.value.identities_list') ?
+				_.get(policies[pol], 'policy.value.identities_list') :
+				_.get(policies[pol], 'policy.value.identities');
 			for (let i in identities) {
 				let role = pol.toLowerCase();
 				switch (role) {

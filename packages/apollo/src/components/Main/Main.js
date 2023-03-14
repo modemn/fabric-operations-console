@@ -172,6 +172,10 @@ class Main extends Component {
 										path="/debug/orderer/:ordererId/:channelId?"
 										component={OrdererDetails}
 									/>
+									<Route path="/orderer/:clusterId/channel/:channelId"
+										component={ChannelDetails}
+										exact
+									/>
 									<Route path="/ca/:caId"
 										component={CADetails}
 									/>
@@ -187,17 +191,13 @@ class Main extends Component {
 										component={ChannelDetails}
 										exact
 									/>
-									{/* /debug is a debugging route that exposes a link in the left pane to download the config block of the channel */ }
+									{/* /debug is a debugging route that exposes a link in the left pane to download the config block of the channel */}
 									<Route path="/debug/peer/:peerId/channel/:channelId"
 										component={ChannelDetails}
 										exact
 									/>
 									<Route path="/peer/:peerId/channel/:channelId/block/:blockNumber"
 										component={ChannelBlock}
-										exact
-									/>
-									<Route path="/channel/:channelId"
-										component={ChannelDetails}
 										exact
 									/>
 									<Route path="/channel/:channelId/block/:blockNumber"

@@ -97,6 +97,7 @@ class Orderers extends Component {
 					loading: false,
 				});
 				NodeStatus.getStatus(ordererList, SCOPE, 'ordererList');
+				console.log("NIK - orderer info from orderer section", ordererList);
 			})
 			.catch(error => {
 				Log.error(error);

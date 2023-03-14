@@ -572,12 +572,18 @@ class ChannelApi {
 	}
 	static getOrdererAddresses(config) {
 		let addresses = [];
-		const l_orderers = _.get(config, 'channel_group.values_map.OrdererAddresses.value.addresses_list', []);
+		const l_orderers = _.get(config, 'channel_group.values_map.OrdererAddresses.value.addresses_list', []) ?
+			_.get(config, 'channel_group.values_map.OrdererAddresses.value.addresses_list', []) :
+			_.get(config, 'channel_group.values.OrdererAddresses.value.addresses_list', []);
 		addresses.push(...l_orderers);
 		if (addresses.length === 0) {
-			const orderer_grp = _.get(config, 'channel_group.groups_map.Orderer.groups_map');
+			const orderer_grp = _.get(config, 'channel_group.groups_map.Orderer.groups_map') ?
+				_.get(config, 'channel_group.groups_map.Orderer.groups_map') :
+				_.get(config, 'channel_group.groups.Orderer.groups');
 			for (let ordererMSP in orderer_grp) {
-				const org_addresses = _.get(orderer_grp[ordererMSP], 'values_map.Endpoints.value.addresses');
+				const org_addresses = _.get(orderer_grp[ordererMSP], 'values_map.Endpoints.value.addresses') ?
+					_.get(orderer_grp[ordererMSP], 'values_map.Endpoints.value.addresses') :
+					_.get(orderer_grp[ordererMSP], 'values.Endpoints.value.addresses');
 				if (Array.isArray(org_addresses)) {
 					addresses.push(...org_addresses);
 				}
@@ -1125,10 +1131,12 @@ class ChannelApi {
 		let ch_config_resp;
 		let block_json;
 		try {
+			console.log('NIK ChannelApi Options first try:', options)
 			ch_config_resp = await StitchApi.getChannelConfigWithRetry(options);
 		} catch (error) {
 			try {
 				let orderers = await OrdererRestApi.getOrderersFromCluster(options.orderer_host);
+				console.log('NIK ChannelApi Options sceond try:', options)
 				ch_config_resp = await StitchApi.getChannelConfigWithRetry(options, orderers);
 			} catch (e) {
 				Log.error(error);
